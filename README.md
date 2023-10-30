@@ -37,12 +37,15 @@ import (
 )
 
 func main() {
-	// Subscribe to Microsoft-Windows-DNS-Client
-	guid, _ := windows.GUIDFromString("{1C95126E-7EEA-49A9-A3FE-A378B03DDB4D}")
-	session, err := etw.NewSession(guid)
+	// Create a new trace session. 
+	session, err := etw.NewSession("TestSession")
 	if err != nil {
 		log.Fatalf("Failed to create etw session: %s", err)
 	}
+
+	// Update trace session with provider guid. 
+	guid, _ := windows.GUIDFromString("{1C95126E-7EEA-49A9-A3FE-A378B03DDB4D}")
+	session.UpdateOptions(guid) 
 
 	// Wait for "DNS query request" events to log outgoing DNS requests.
 	cb := func(e *etw.Event) {

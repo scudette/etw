@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package etw_test
@@ -6,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -53,8 +55,60 @@ func (s *sessionSuite) TestSmoke() {
 	go s.generateEvents(s.ctx, []msetw.Level{msetw.LevelInfo})
 
 	// Ensure we can subscribe to our in-house ETW provider.
-	session, err := etw.NewSession(s.guid)
+	session, err := etw.NewSession("etw-go-" + randomName())
 	s.Require().NoError(err, "Failed to create session")
+
+	session.UpdateOptions(s.guid)
+
+	// The only thing we are going to do is signal that we've got something.
+	gotEvent := make(chan struct{})
+	cb := func(_ *etw.Event) {
+		s.trySignal(gotEvent)
+	}
+
+	// Start the processing routine. We expect the routine will stop on `session.Close()`.
+	done := make(chan struct{})
+	go func() {
+		s.Require().NoError(session.Process(cb), "Error processing events")
+		close(done)
+	}()
+
+	// Ensure that we are able to receive events from the provider. An ability
+	// to get the proper content is tested in TestParsing.
+	s.waitForSignal(gotEvent, deadline, "Failed to receive event from provider")
+
+	// Now stop the session and ensure that processing goroutine will also stop.
+	s.Require().NoError(session.Close(), "Failed to close session properly")
+	s.waitForSignal(done, deadline, "Failed to stop event processing")
+}
+
+func (s *sessionSuite) TestMultiple() {
+	const deadline = 10 * time.Second
+	smbServer, _ := windows.GUIDFromString("{D48CE617-33A2-4BC3-A5C7-11AA4F29619E}")
+	smbClient, _ := windows.GUIDFromString("{988C59C5-0A1C-45B6-A555-0C62276E327E}")
+
+	providers := []etw.SessionOptions{
+		{
+			Guid: smbServer,
+		},
+		{
+			Guid: smbClient,
+		},
+		{
+			Guid: s.guid,
+		},
+	}
+
+	// Spam some events to emulate a normal ETW provider behaviour.
+	go s.generateEvents(s.ctx, []msetw.Level{msetw.LevelInfo})
+
+	// Ensure we can subscribe to our in-house ETW provider.
+	session, err := etw.NewSession("etw-go-" + randomName())
+	s.Require().NoError(err, "Failed to create session")
+
+	for _, provider := range providers {
+		session.UpdateOptions(provider.Guid)
+	}
 
 	// The only thing we are going to do is signal that we've got something.
 	gotEvent := make(chan struct{})
@@ -86,8 +140,11 @@ func (s *sessionSuite) TestUpdating() {
 	go s.generateEvents(s.ctx, []msetw.Level{msetw.LevelInfo, msetw.LevelCritical})
 
 	// Then subscribe for CRITICAL only.
-	session, err := etw.NewSession(s.guid, etw.WithLevel(etw.TRACE_LEVEL_CRITICAL))
+	session, err := etw.NewSession("go-etw-" + randomName())
 	s.Require().NoError(err, "Failed to create session")
+
+	err = session.UpdateOptions(s.guid, etw.WithLevel(etw.TRACE_LEVEL_CRITICAL))
+	s.Require().NoError(err, "Failed to update session options")
 
 	// Callback will signal about seen event level through corresponding channels.
 	var (
@@ -118,7 +175,7 @@ func (s *sessionSuite) TestUpdating() {
 
 	// Now bump the subscription option with new event level.
 	// (We could actually update any updatable option, level is just the most obvious.)
-	err = session.UpdateOptions(etw.WithLevel(etw.TRACE_LEVEL_INFORMATION))
+	err = session.UpdateOptions(s.guid, etw.WithLevel(etw.TRACE_LEVEL_INFORMATION))
 	s.Require().NoError(err, "Failed to update session options")
 
 	// If the options update was successfully applied we should catch event with INFO level too.
@@ -166,7 +223,10 @@ func (s *sessionSuite) TestParsing() {
 		"anotherArray":       []interface{}{"3", "4"},
 	}
 
-	session, err := etw.NewSession(s.guid, etw.WithLevel(etw.TRACE_LEVEL_VERBOSE))
+	session, err := etw.NewSession("etw-go-" + randomName())
+	s.Require().NoError(err, "Failed to create a session")
+
+	err = session.UpdateOptions(s.guid, etw.WithLevel(etw.TRACE_LEVEL_VERBOSE))
 	s.Require().NoError(err, "Failed to create a session")
 
 	var (
@@ -198,11 +258,11 @@ func (s *sessionSuite) TestKillSession() {
 	sessionName := fmt.Sprintf("go-etw-suicide-%d", time.Now().UnixNano())
 
 	// Ensure we can create a session with a given name.
-	_, err := etw.NewSession(s.guid, etw.WithName(sessionName))
+	_, err := etw.NewSession(sessionName)
 	s.Require().NoError(err, "Failed to create session with name %s", sessionName)
 
 	// Ensure we've got ExistsError creating a session with the same name.
-	_, err = etw.NewSession(s.guid, etw.WithName(sessionName))
+	_, err = etw.NewSession(sessionName)
 	s.Require().Error(err)
 
 	var exists etw.ExistsError
@@ -213,7 +273,7 @@ func (s *sessionSuite) TestKillSession() {
 	s.Require().NoError(etw.KillSession(sessionName), "Failed to force stop session")
 
 	// Ensure that fresh session could normally started and stopped.
-	session, err := etw.NewSession(s.guid, etw.WithName(sessionName))
+	session, err := etw.NewSession(sessionName)
 	s.Require().NoError(err, "Failed to create session after a successful kill")
 	s.Require().NoError(session.Close(), "Failed to close session properly")
 }
@@ -223,8 +283,9 @@ func (s *sessionSuite) TestEventOutsideCallback() {
 	const deadline = 10 * time.Second
 	go s.generateEvents(s.ctx, []msetw.Level{msetw.LevelInfo})
 
-	session, err := etw.NewSession(s.guid)
+	session, err := etw.NewSession("etw-go-" + randomName())
 	s.Require().NoError(err, "Failed to create session")
+	session.UpdateOptions(s.guid)
 
 	// Grab event pointer from the callback. We expect that outdated pointer
 	// will protect user from calling Windows API on freed memory.
@@ -299,4 +360,19 @@ func (s sessionSuite) generateEvents(ctx context.Context, levels []msetw.Level, 
 			}
 		}
 	}
+}
+
+func randomName() string {
+	if g, err := windows.GenerateGUID(); err == nil {
+		return g.String()
+	}
+
+	// should be almost impossible, right?
+	rand.Seed(time.Now().UnixNano())
+	const alph = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = alph[rand.Intn(len(alph))]
+	}
+	return string(b)
 }

@@ -1,4 +1,5 @@
-//+build windows
+//go:build windows
+// +build windows
 
 package etw
 
@@ -6,6 +7,7 @@ package etw
 	#include "windows.h"
 */
 import "C"
+import "golang.org/x/sys/windows"
 
 // SessionOptions describes Session subscription options.
 //
@@ -16,6 +18,9 @@ type SessionOptions struct {
 	// could be controlled from other processed by it's name, so it should be
 	// unique.
 	Name string
+
+	// Provider GUID to be added to this session.
+	Guid windows.GUID
 
 	// Level represents provider-defined value that specifies the level of
 	// detail included in the event. Higher levels imply that you get lower
