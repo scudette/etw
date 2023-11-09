@@ -1,4 +1,5 @@
-//+build windows
+//go:build windows
+// +build windows
 
 package etw
 
@@ -88,9 +89,9 @@ type EventDescriptor struct {
 // EventProperties returns a map that could be interpreted as "structure that
 // fit inside a map". Map keys is a event data field names, map values is field
 // values rendered to strings. So map values could be one of the following:
-//		- `[]string` for arrays of any types;
-//		- `map[string]interface{}` for fields that are structures;
-//		- `string` for any other values.
+//   - `[]string` for arrays of any types;
+//   - `map[string]interface{}` for fields that are structures;
+//   - `string` for any other values.
 //
 // Take a look at `TestParsing` for possible EventProperties values.
 func (e *Event) EventProperties() (map[string]interface{}, error) {
@@ -515,6 +516,11 @@ func stampToTime(quadPart C.LONGLONG) time.Time {
 // with a following slicing.
 // Ref: https://github.com/golang/go/wiki/cgo#turning-c-arrays-into-go-slices
 func createUTF16String(ptr uintptr, len int) string {
+	// Race detector doesn't like this cast, but it's safe.
+	// ptr is represented as a kernel address > 0xC0'0000'0000
+	if !AllowKernelAccess && ptr > 0x7FFFFFFFFF {
+		return ""
+	}
 	if len == 0 {
 		return ""
 	}

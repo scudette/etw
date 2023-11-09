@@ -9,7 +9,7 @@
 
 // OpenTraceHelper helps to access EVENT_TRACE_LOGFILEW union fields and pass
 // pointer to C not warning CGO checker.
-TRACEHANDLE OpenTraceHelper(LPWSTR name, PVOID ctx);
+TRACEHANDLE OpenTraceHelper(LPWSTR name, UINT64 ctx);
 
 // GetArraySize extracts a size of array located at property @i.
 ULONG GetArraySize(PEVENT_RECORD event, PTRACE_EVENT_INFO info, int idx, UINT32* count);
