@@ -109,11 +109,11 @@ func (self *Session) Process(cb EventCallback) error {
 	self.mu.Lock()
 	self.callback = cb
 	hSession := self.hSession
-	config := []SessionOptions{}
+	config := make([]SessionOptions, len(self.config))
 	copy(config, self.config)
 	self.mu.Unlock()
 
-	if config == nil || len(config) == 0 {
+	if len(config) == 0 {
 		return fmt.Errorf("no providers to subscribe to;")
 	}
 
