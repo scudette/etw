@@ -18,6 +18,7 @@ package etw
 */
 import "C"
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -52,12 +53,16 @@ type Session struct {
 	mu sync.Mutex
 
 	name     string
-	config   []SessionOptions
 	callback EventCallback
+
+	// Keep track of the currently open providers
+	providers map[string]windows.GUID
 
 	etwSessionName []uint16
 	hSession       C.TRACEHANDLE
 	propertiesBuf  []byte
+
+	closed bool
 }
 
 // EventCallback is any function that could handle an ETW event. EventCallback
@@ -80,10 +85,12 @@ type EventCallback func(e *Event)
 //
 // You MUST call `.Close` on session after use to clear associated resources,
 // otherwise it will leak in OS internals until system reboot.
-func NewSession(sessionName string) (*Session, error) {
+func NewSession(sessionName string, cb EventCallback) (*Session, error) {
 
-	s := Session{
-		name: sessionName,
+	s := &Session{
+		name:      sessionName,
+		providers: make(map[string]windows.GUID),
+		callback:  cb,
 	}
 
 	utf16Name, err := windows.UTF16FromString(sessionName)
@@ -92,12 +99,12 @@ func NewSession(sessionName string) (*Session, error) {
 	}
 	s.etwSessionName = utf16Name
 
-	if err := s.createETWSession(); err != nil {
+	err = s.createETWSession()
+	if err != nil {
 		return nil, fmt.Errorf("failed to create session; %w", err)
 	}
-	// TODO: consider setting a finalizer with .Close
 
-	return &s, nil
+	return s, nil
 }
 
 // Process starts processing of ETW events. Events will be passed to @cb
@@ -105,65 +112,14 @@ func NewSession(sessionName string) (*Session, error) {
 // for more info about events processing.
 //
 // N.B. Process blocks until `.Close` being called!
-func (self *Session) Process(cb EventCallback) error {
-	self.mu.Lock()
-	self.callback = cb
-	hSession := self.hSession
-	config := make([]SessionOptions, len(self.config))
-	copy(config, self.config)
-	self.mu.Unlock()
-
-	if len(config) == 0 {
-		return fmt.Errorf("no providers to subscribe to;")
-	}
-
-	for _, cfg := range config {
-		if err := subscribeToProvider(cfg, hSession); err != nil {
-			return fmt.Errorf("failed to subscribe to provider; %w", err)
-		}
-	}
-
+func (self *Session) Process() error {
 	cgoKey := newCallbackKey(self)
 	defer freeCallbackKey(cgoKey)
 
 	// Will block here until being closed.
-	if err := self.processEvents(cgoKey); err != nil {
+	err := self.processEvents(cgoKey)
+	if err != nil {
 		return fmt.Errorf("error processing events; %w", err)
-	}
-	return nil
-}
-
-// UpdateOptions changes subscription parameters in runtime. The only option
-// that can't be updated is session name. To change session name -- stop and
-// recreate a session with new desired name.
-func (self *Session) UpdateOptions(providerGUID windows.GUID, options ...Option) error {
-	self.mu.Lock()
-	defer self.mu.Unlock()
-	hSession := self.hSession
-
-	for i, cfg := range self.config {
-		if cfg.Guid == providerGUID {
-			for _, opt := range options {
-				opt(&cfg)
-			}
-			self.config[i] = cfg
-
-			if err := subscribeToProvider(cfg, hSession); err != nil {
-				return fmt.Errorf("failed to enable provider; %w", err)
-			}
-			return nil
-		}
-	}
-
-	cfg := SessionOptions{}
-	for _, opt := range options {
-		opt(&cfg)
-	}
-	cfg.Guid = providerGUID
-	self.config = append(self.config, cfg)
-
-	if err := subscribeToProvider(cfg, hSession); err != nil {
-		return err
 	}
 	return nil
 }
@@ -172,18 +128,22 @@ func (self *Session) UpdateOptions(providerGUID windows.GUID, options ...Option)
 func (self *Session) Close() error {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	hSession := self.hSession
+
+	self.closed = true
 
 	// "Be sure to disable all providers before stopping the session."
 	// https://docs.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-an-event-tracing-session
-	for _, cfg := range self.config {
-		if err := unsubscribeFromProvider(cfg, hSession); err != nil {
+	for _, guid := range self.providers {
+		err := self.UnsubscribeFromProvider(guid)
+		if err != nil {
 			return fmt.Errorf("failed to disable provider; %w", err)
 		}
 	}
-	if err := self.stopSession(); err != nil {
+	err := self.stopSession()
+	if err != nil {
 		return fmt.Errorf("failed to stop session; %w", err)
 	}
+
 	return nil
 }
 
@@ -279,7 +239,14 @@ func (self *Session) createETWSession() error {
 }
 
 // subscribeToProvider wraps EnableTraceEx2 with EVENT_CONTROL_CODE_ENABLE_PROVIDER.
-func subscribeToProvider(config SessionOptions, hSession C.ULONGLONG) error {
+func (self *Session) SubscribeToProvider(config SessionOptions) error {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.closed {
+		return errors.New("Session already closed")
+	}
+
 	// https://docs.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-an-event-tracing-session
 	params := C.ENABLE_TRACE_PARAMETERS{
 		Version: 2, // ENABLE_TRACE_PARAMETERS_VERSION_2
@@ -301,7 +268,7 @@ func subscribeToProvider(config SessionOptions, hSession C.ULONGLONG) error {
 	//
 	// Ref: https://docs.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-enabletraceex2
 	ret := C.EnableTraceEx2(
-		hSession,
+		self.hSession,
 		(*C.GUID)(unsafe.Pointer(&config.Guid)),
 		C.EVENT_CONTROL_CODE_ENABLE_PROVIDER,
 		C.UCHAR(config.Level),
@@ -314,11 +281,21 @@ func subscribeToProvider(config SessionOptions, hSession C.ULONGLONG) error {
 	if status := windows.Errno(ret); status != windows.ERROR_SUCCESS {
 		return fmt.Errorf("EVENT_CONTROL_CODE_ENABLE_PROVIDER failed; %w", status)
 	}
+
+	self.providers[config.Guid.String()] = config.Guid
+
 	return nil
 }
 
 // unsubscribeFromProvider wraps EnableTraceEx2 with EVENT_CONTROL_CODE_DISABLE_PROVIDER.
-func unsubscribeFromProvider(cfg SessionOptions, hSession C.ULONGLONG) error {
+func (self *Session) UnsubscribeFromProvider(guid windows.GUID) error {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.closed {
+		return errors.New("Session already closed")
+	}
+
 	// ULONG WMIAPI EnableTraceEx2(
 	//	TRACEHANDLE              TraceHandle,
 	//	LPCGUID                  ProviderId,
@@ -330,8 +307,8 @@ func unsubscribeFromProvider(cfg SessionOptions, hSession C.ULONGLONG) error {
 	//	PENABLE_TRACE_PARAMETERS EnableParameters
 	// );
 	ret := C.EnableTraceEx2(
-		hSession,
-		(*C.GUID)(unsafe.Pointer(&cfg.Guid)),
+		self.hSession,
+		(*C.GUID)(unsafe.Pointer(&guid)),
 		C.EVENT_CONTROL_CODE_DISABLE_PROVIDER,
 		0,
 		0,
@@ -341,6 +318,8 @@ func unsubscribeFromProvider(cfg SessionOptions, hSession C.ULONGLONG) error {
 	status := windows.Errno(ret)
 	switch status {
 	case windows.ERROR_SUCCESS, windows.ERROR_NOT_FOUND:
+
+		delete(self.providers, guid.String())
 		return nil
 	}
 	return status
@@ -445,6 +424,7 @@ func handleEvent(eventRecord C.PEVENT_RECORD) {
 		Header:      eventHeaderToGo(eventRecord.EventHeader),
 		eventRecord: eventRecord,
 	}
+
 	targetSession.(*Session).callback(evt)
 	evt.eventRecord = nil
 }
