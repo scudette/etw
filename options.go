@@ -60,6 +60,10 @@ type SessionOptions struct {
 	// original API reference:
 	// https://docs.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-enable_trace_parameters
 	EnableProperties []EnableProperty
+
+	// Rundown is a boolean value to determine whether it will be a standard
+	// ETW session, or whether the rundown parameter will be provided.
+	CaptureState bool
 }
 
 // Option is any function that modifies SessionOptions. Options will be called

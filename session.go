@@ -255,6 +255,8 @@ func (self *Session) SubscribeToProvider(config SessionOptions) error {
 		params.EnableProperty |= C.ULONG(p)
 	}
 
+	controlCode := C.EVENT_CONTROL_CODE_ENABLE_PROVIDER
+
 	// ULONG WMIAPI EnableTraceEx2(
 	//	TRACEHANDLE              TraceHandle,
 	//	LPCGUID                  ProviderId,
@@ -270,7 +272,7 @@ func (self *Session) SubscribeToProvider(config SessionOptions) error {
 	ret := C.EnableTraceEx2(
 		self.hSession,
 		(*C.GUID)(unsafe.Pointer(&config.Guid)),
-		C.EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+		C.ULONG(controlCode),
 		C.UCHAR(config.Level),
 		C.ULONGLONG(config.MatchAnyKeyword),
 		C.ULONGLONG(config.MatchAllKeyword),
@@ -283,6 +285,25 @@ func (self *Session) SubscribeToProvider(config SessionOptions) error {
 	}
 
 	self.providers[config.Guid.String()] = config.Guid
+
+	if config.CaptureState {
+		controlCode = 0x2 // EVENT_CONTROL_CODE_CAPTURE_STATE (Rundown)
+
+		ret := C.EnableTraceEx2(
+			self.hSession,
+			(*C.GUID)(unsafe.Pointer(&config.Guid)),
+			C.ULONG(controlCode),
+			C.UCHAR(config.Level),
+			C.ULONGLONG(config.MatchAnyKeyword),
+			C.ULONGLONG(config.MatchAllKeyword),
+			0,       // Timeout set to zero to enable the trace asynchronously
+			&params, //nolint:gocritic // TODO: dupSubExpr?? gocritic bug?
+		)
+
+		if status := windows.Errno(ret); status != windows.ERROR_SUCCESS {
+			return fmt.Errorf("EVENT_CONTROL_CODE_ENABLE_PROVIDER failed; %w", status)
+		}
+	}
 
 	return nil
 }
