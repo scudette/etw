@@ -1,5 +1,4 @@
-//go:build windows
-// +build windows,!amd64
+//go:build windows && !amd64
 
 package etw
 
