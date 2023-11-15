@@ -64,6 +64,11 @@ type SessionOptions struct {
 	// Rundown is a boolean value to determine whether it will be a standard
 	// ETW session, or whether the rundown parameter will be provided.
 	CaptureState bool
+
+	// Calling TdhGetEventMapInformation is very slow and causes
+	// events to be dropped, yet for most fields it is not needed. We
+	// turn this off by default to reduce endpoint load.
+	EnableMapInfo bool
 }
 
 // Option is any function that modifies SessionOptions. Options will be called

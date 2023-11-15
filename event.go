@@ -94,7 +94,7 @@ type EventDescriptor struct {
 //   - `string` for any other values.
 //
 // Take a look at `TestParsing` for possible EventProperties values.
-func (e *Event) EventProperties() (map[string]interface{}, error) {
+func (e *Event) EventProperties(resolveMapInfo bool) (map[string]interface{}, error) {
 	if e.eventRecord == nil {
 		return nil, fmt.Errorf("usage of Event is invalid outside of EventCallback")
 	}
@@ -110,6 +110,8 @@ func (e *Event) EventProperties() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to parse event properties; %w", err)
 	}
 	defer p.free()
+
+	p.resolveMapInfo = resolveMapInfo
 
 	properties := make(map[string]interface{}, int(p.info.TopLevelPropertyCount))
 	for i := 0; i < int(p.info.TopLevelPropertyCount); i++ {
@@ -254,6 +256,10 @@ type propertyParser struct {
 	data    uintptr
 	endData uintptr
 	ptrSize uintptr
+
+	// Resolving MapInfo is very expensive and it is not needed much
+	// of the time. Provide this to optionally skip this step.
+	resolveMapInfo bool
 }
 
 func newPropertyParser(r C.PEVENT_RECORD) (*propertyParser, error) {
@@ -386,9 +392,18 @@ var (
 // parseSimpleType wraps TdhFormatProperty to get rendered to string value of
 // @i-th event property.
 func (p *propertyParser) parseSimpleType(i int) (string, error) {
-	mapInfo, err := getMapInfo(p.record, p.info, i)
-	if err != nil {
-		return "", fmt.Errorf("failed to get map info; %w", err)
+	var mapInfo unsafe.Pointer
+	var err error
+
+	// This function call is very expensive and can hold up the
+	// processing loop causing many events to be dropped. We
+	// optionally can disable looking up the map info completely. This
+	// seems to work well for most providers.
+	if p.resolveMapInfo {
+		mapInfo, err = getMapInfo(p.record, p.info, i)
+		if err != nil {
+			return "", fmt.Errorf("failed to get map info; %w", err)
+		}
 	}
 
 	var propertyLength C.uint
