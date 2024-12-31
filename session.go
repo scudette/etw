@@ -219,7 +219,8 @@ func (self *Session) createETWSession() error {
 	pProperties.Wnode.ClientContext = 1 // QPC for event Timestamp
 	pProperties.Wnode.Flags = C.WNODE_FLAG_TRACED_GUID
 
-	// Mark that we are going to process events in real time using a callback.
+	// Mark that we are going to process events in real time using a
+	// callback.
 	pProperties.LogFileMode = C.EVENT_TRACE_REAL_TIME_MODE
 
 	ret := C.StartTraceW(
@@ -227,6 +228,7 @@ func (self *Session) createETWSession() error {
 		C.LPWSTR(unsafe.Pointer(&self.etwSessionName[0])),
 		pProperties,
 	)
+
 	switch err := windows.Errno(ret); err {
 	case windows.ERROR_ALREADY_EXISTS:
 		return ExistsError{SessionName: self.name}
@@ -249,7 +251,7 @@ func (self *Session) SubscribeToProvider(config SessionOptions) error {
 
 	// https://docs.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-an-event-tracing-session
 	params := C.ENABLE_TRACE_PARAMETERS{
-		Version: 2, // ENABLE_TRACE_PARAMETERS_VERSION_2
+		Version: C.ENABLE_TRACE_PARAMETERS_VERSION_2,
 	}
 	for _, p := range config.EnableProperties {
 		params.EnableProperty |= C.ULONG(p)
@@ -287,7 +289,7 @@ func (self *Session) SubscribeToProvider(config SessionOptions) error {
 	self.providers[config.Guid.String()] = config.Guid
 
 	if config.CaptureState {
-		controlCode = 0x2 // EVENT_CONTROL_CODE_CAPTURE_STATE (Rundown)
+		controlCode = C.EVENT_CONTROL_CODE_CAPTURE_STATE // (Rundown)
 
 		ret := C.EnableTraceEx2(
 			self.hSession,
@@ -356,6 +358,7 @@ func (s *Session) processEvents(callbackContextKey uintptr) error {
 	if C.INVALID_PROCESSTRACE_HANDLE == traceHandle {
 		return fmt.Errorf("OpenTraceW failed; %w", windows.GetLastError())
 	}
+	defer C.CloseTrace(traceHandle)
 
 	// BLOCKS UNTIL CLOSED!
 	//

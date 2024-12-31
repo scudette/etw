@@ -10,9 +10,11 @@ import "C"
 import (
 	"fmt"
 	"math"
+	"sync"
 	"time"
 	"unsafe"
 
+	"github.com/Velocidex/ordereddict"
 	"golang.org/x/sys/windows"
 )
 
@@ -23,7 +25,12 @@ import (
 // Events will be passed to the user EventCallback. It's invalid to use Event
 // methods outside of an EventCallback.
 type Event struct {
+	mu sync.Mutex
+
 	Header      EventHeader
+	parsed      *ordereddict.Dict
+	event_props *ordereddict.Dict
+
 	eventRecord C.PEVENT_RECORD
 }
 
@@ -47,6 +54,8 @@ type EventHeader struct {
 	KernelTime    uint32
 	UserTime      uint32
 	ProcessorTime uint64
+
+	KernelLoggerType KernelLoggerType
 }
 
 // HasCPUTime returns true if the event has separate UserTime and KernelTime
@@ -94,26 +103,27 @@ type EventDescriptor struct {
 //   - `string` for any other values.
 //
 // Take a look at `TestParsing` for possible EventProperties values.
-func (e *Event) EventProperties(resolveMapInfo bool) (map[string]interface{}, error) {
+func (e *Event) EventProperties(resolveMapInfo bool) (*ordereddict.Dict, error) {
 	if e.eventRecord == nil {
 		return nil, fmt.Errorf("usage of Event is invalid outside of EventCallback")
 	}
 
 	if e.eventRecord.EventHeader.Flags == C.EVENT_HEADER_FLAG_STRING_ONLY {
-		return map[string]interface{}{
-			"_": C.GoString((*C.char)(e.eventRecord.UserData)),
-		}, nil
+		return ordereddict.NewDict().Set(
+			"_", C.GoString((*C.char)(e.eventRecord.UserData))), nil
 	}
 
 	p, err := newPropertyParser(e.eventRecord)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse event properties; %w", err)
+		// Cant parse the properties, just forward an empty set.
+		return ordereddict.NewDict(), nil
 	}
 	defer p.free()
 
 	p.resolveMapInfo = resolveMapInfo
 
-	properties := make(map[string]interface{}, int(p.info.TopLevelPropertyCount))
+	properties := ordereddict.NewDict()
+
 	for i := 0; i < int(p.info.TopLevelPropertyCount); i++ {
 		name := p.getPropertyName(i)
 		value, err := p.getPropertyValue(i)
@@ -122,9 +132,51 @@ func (e *Event) EventProperties(resolveMapInfo bool) (map[string]interface{}, er
 			// If we skip any -- we'll lost offset, so fail early.
 			return nil, fmt.Errorf("failed to parse %q value; %w", name, err)
 		}
-		properties[name] = value
+		properties.Set(name, value)
 	}
 	return properties, nil
+}
+
+func (self *Event) Parsed() *ordereddict.Dict {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.parsed != nil {
+		return self.parsed
+	}
+
+	event := ordereddict.NewDict()
+	header := ordereddict.NewDict().
+		Set("ID", self.Header.ID).
+		Set("ProcessID", self.Header.ProcessID).
+		Set("TimeStamp", self.Header.TimeStamp).
+		Set("Provider", self.Header.ProviderID.String()).
+		Set("OpCode", self.Header.OpCode)
+	event.Set("Header", header)
+
+	if self.Header.KernelLoggerType != UnknownLoggerType {
+		header.Set("KernelEventType", self.Header.KernelLoggerType.String())
+	}
+
+	data, err := self.EventProperties(false)
+	if err == nil {
+		event.Set("EventProperties", data)
+		self.event_props = data
+	} else {
+		self.event_props = ordereddict.NewDict()
+	}
+
+	self.parsed = event
+	return event
+}
+
+func (self *Event) Props() *ordereddict.Dict {
+	self.Parsed()
+
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	return self.event_props
 }
 
 // ExtendedEventInfo contains additional information about received event. All
@@ -289,8 +341,9 @@ func newPropertyParser(r C.PEVENT_RECORD) (*propertyParser, error) {
 // Returned info MUST be freed after use.
 func getEventInformation(pEvent C.PEVENT_RECORD) (C.PTRACE_EVENT_INFO, error) {
 	var (
-		pInfo      C.PTRACE_EVENT_INFO
-		bufferSize C.ulong
+		// Start off with a reasonable buffer size
+		bufferSize C.ulong             = 1024
+		pInfo      C.PTRACE_EVENT_INFO = C.PTRACE_EVENT_INFO(C.malloc(C.size_t(bufferSize)))
 	)
 
 	// Retrieve a buffer size.
